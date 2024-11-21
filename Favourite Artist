@@ -1,0 +1,83 @@
+#This section shows the required/imported libraries for the code to work on streamlit using the spotipy web API
+#It also imports the authentication needed so that users can log in with their own spotify account
+import streamlit as st
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+from datetime import datetime, timedelta
+
+#This is needed to identify the user and load the website
+SPOTIPY_CLIENT_ID = '53074fbca7704aef8ff5e43f4371bca2'
+SPOTIPY_CLIENT_SECRET = '30a69a1e644640168c85054e1c53b0c3'
+SPOTIPY_REDIRECT_URI = 'http://localhost:8505'
+
+scope = "user-top-read playlist-modify-public playlist-modify-private user-read-recently-played"
+cache_path=".spotifycache"
+
+# Setting up Spotify authentication
+sp_oauth = SpotifyOAuth(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET, redirect_uri=SPOTIPY_REDIRECT_URI, scope=scope)
+
+@st.cache_data
+def authenticate_spotify():
+    token_info = sp_oauth.get_access_token(as_dict=False)
+    if token_info:
+        return spotipy.Spotify(auth=token_info)
+    return None
+
+
+# Here the application specific code is written, everything above applies to the other functions of the streamlit website
+
+background_color = "#F4DEB3" #yellowish
+
+def get_recent_tracks(sp, days_back):
+    # Calculate time range from which to get the last tracks
+    end_time = datetime.now()
+    start_time = end_time - timedelta(days=days_back)
+    start_timestamp = int(start_time.timestamp()) * 1000  # Convert to milliseconds for Spotify API
+    
+    # Collects the recent tracks the user listened to. Spotipy unfortunately limits this to 50 tracks
+    all_tracks = []
+    results = sp.current_user_recently_played(limit=50, after=start_timestamp)
+    
+    # Fetch pages of results until there are no more tracks available
+    while results:
+        all_tracks.extend(results['items'])
+        if results['next']:
+            results = sp.next(results)  # Move to the next page of results until we reach the 50 tracks cap
+        else:
+            break
+
+    return all_tracks
+
+def calculate_listening_time(tracks):
+    # Calculate total listening time in hours
+    total_ms = sum([track['track']['duration_ms'] for track in tracks])
+    total_hours = total_ms / (1000 * 60 * 60)
+    return total_hours
+
+def main():
+    st.title("Spotify Listening Time Tracker")
+    
+    # User authentication
+    st.write("Please authenticate with Spotify to view your listening stats.")
+    sp = authenticate_spotify()
+    
+    if sp:
+        st.success("Authentication successful!")
+        
+        # Select time period
+        time_period = st.selectbox("Select Time Period:", ["Last 24 hours", "Last Week"])
+        days_back = 1 if time_period == "24 hours" else 7
+
+        # Get recent tracks and calculate listening time
+        with st.spinner("Fetching your listening history..."):
+            tracks = get_recent_tracks(sp, days_back)
+            if tracks:
+                total_hours = calculate_listening_time(tracks)
+                st.write(f"You listened to Spotify for approximately {total_hours:.2f} hours in the {time_period.lower()}.")
+            else:
+                st.warning("No listening data available for this period.")
+    else:
+        st.error("Authentication failed. Please try again.")
+
+if __name__ == "__main__":
+    main()
