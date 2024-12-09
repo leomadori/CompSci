@@ -1,0 +1,480 @@
+import streamlit as st
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+from collections import Counter
+from datetime import datetime, timedelta
+
+# Spotify API credentials of the user
+SPOTIPY_CLIENT_ID = '53074fbca7704aef8ff5e43f4371bca2'
+SPOTIPY_CLIENT_SECRET = 'efd9415d3ddd4e0ba1260d139e938d77'
+SPOTIPY_REDIRECT_URI = 'http://localhost:8505'
+
+scope = "user-top-read playlist-modify-public playlist-modify-private user-read-recently-played user-top-read"
+cache_path=".spotifycache"
+
+# Set up for the Spotify Authentication with OAuth; sp indicates an instance of an authenticated spotify client
+sp_oauth = SpotifyOAuth(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET, redirect_uri=SPOTIPY_REDIRECT_URI, scope=scope)
+
+
+#Allows Spotify API to access user specific data (e.g. top tracks and artists)
+@st.cache_data #To re-cache the result instead of reauthenticating
+def authenticate_spotify():
+    token_info = sp_oauth.get_access_token(as_dict=False)
+    if token_info:
+        return spotipy.Spotify(auth=token_info)
+    return None
+
+# Here the main function begins
+# Gets top items of users (e.g. artists and tracks) based on the specified parameters (e.g. time range)
+def get_user_top_items(sp, item_type="tracks", limit=10, time_range="medium_term"):
+    if item_type == "tracks":
+        return sp.current_user_top_tracks(limit=limit, time_range=time_range)['items']
+    elif item_type == "artists":
+        return sp.current_user_top_artists(limit=limit, time_range=time_range)['items']
+    return []
+
+
+#Gets the top listened track on spotify and returns a tuple (song name, artist name, album image, song id)
+def get_favorite_song(sp):
+    top_tracks = get_user_top_items(sp, item_type="tracks", limit=1)
+    if top_tracks:
+        song_name = top_tracks[0]['name']
+        artist_name = top_tracks[0]['artists'][0]['name']
+        album_image = top_tracks[0]['album']['images'][0]['url']
+        song_id = top_tracks[0]['id']
+        return song_name, artist_name, album_image, song_id
+    return None, None, None, None
+
+
+#Gets the top listened track on spotify and returns a tuple (artist name, artist image, artist id)
+def get_favorite_artist(sp):
+    top_artists = get_user_top_items(sp, item_type="artists", limit=1)
+    if top_artists:
+        artist_name = top_artists[0]['name']
+        artist_image = top_artists[0]['images'][0]['url']
+        artist_id = top_artists[0]['id']
+        return artist_name, artist_image, artist_id
+    return None, None, None
+
+
+# Top genre is determined by looking at the users top 10 artist's genre
+def get_favorite_genre(sp):
+    top_artists = get_user_top_items(sp, item_type="artists", limit=10) 
+    genres = [genre for artist in top_artists for genre in artist['genres']] # Creates a list containing the genres the top artists are associated with
+    if genres:
+        most_common_genre = Counter(genres).most_common(1)[0][0]
+        genre_image = top_artists[0]['images'][0]['url'] if top_artists[0]['images'] else None
+        return most_common_genre, genre_image
+    return None, None
+
+# This function gets the user's top 5 artists based on the users total listening time in minutes
+def get_top_5_artists(sp):
+    top_artists = get_user_top_items(sp, item_type="artists", limit=5)
+    artist_time_data = []
+    top_tracks = get_user_top_items(sp, item_type="tracks", limit=50)  # Limited to 50 tracks due to API constraints and you cannot change it
+    # This is why we removed the time/minute counter, as it displays a too low time due to this hardcoded restraint we cannot change
+
+
+    for artist in top_artists:
+        artist_name = artist['name']
+        artist_img = artist['images'][0]['url']
+        
+        # Calculate total listening time in milliseconds for this artist
+        total_ms = sum(track['duration_ms'] for track in top_tracks if track['artists'][0]['name'] == artist_name)
+        
+        # Convert total milliseconds to minutes
+        total_minutes = total_ms // 60000
+        artist_time_data.append((artist_name, artist_img, f"{total_minutes} min"))  # Store only minutes
+
+    return artist_time_data # It is estimated listening time, as you cannot calculate it accurately with the Spotify API --> We chose not to display it
+
+
+# Retrieves the users Top 5 songs in a specified time frame and it also estimates the times the song was played
+def get_top_5_songs(sp, time_range="medium_term"):
+    # Retrieves top 5 tracks for the selected time range
+    top_tracks = get_user_top_items(sp, item_type="tracks", limit=5, time_range=time_range)
+    song_data = []
+
+    # Iterates over each top track and estimates play count. Returns a tuple containing track_name, track_artist, track_img and estimated_play_count
+    for track in top_tracks:
+        track_name = track['name']
+        track_artist = track['artists'][0]['name']
+        track_img = track['album']['images'][0]['url']
+        estimated_play_count = max(1, track['popularity'] // 10)
+        song_data.append((track_name, track_artist, track_img, estimated_play_count))
+
+    return song_data
+
+# Retrieves the top tracks of a specific artist
+def get_artist_top_tracks(sp, artist_id):
+    results = sp.artist_top_tracks(artist_id, country="US")
+    return [(track['name'], track['album']['images'][0]['url']) for track in results['tracks'][:5]]
+
+# This def retrieves the popular tracks of a specific genre
+def get_genre_popular_tracks(sp, genre_name):
+    results = sp.search(q=f"genre:{genre_name}", type="track", limit=5)
+    return [(track['name'], track['album']['images'][0]['url']) for track in results['tracks']['items']]
+
+# Here we get similar songs to the favourite song
+def get_similar_songs(sp, song_id):
+    """Retrieve similar songs to the specified song."""
+    try:
+        # Call Spotify's recommendations API
+        results = sp.recommendations(seed_tracks=[song_id], limit=3)
+        return [
+            (track['name'], track['artists'][0]['name'], track['album']['images'][0]['url'])
+            for track in results['tracks']
+        ]
+    except spotipy.exceptions.SpotifyException as e:
+        # Handles the error
+        st.error("Could not fetch similar songs. Please try again later.")
+        return []
+
+
+# main() is the primary function and sets up the user interface of the app. It manages the session states that controls the display 
+# of certain UI elements (based on the actions of the user)
+def main():
+    # Custom CSS for consistent distance below images
+    st.markdown("""
+        <style>
+        .image-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .image-padding {
+            height: 50px; /* Adjust this value to match text alignment needs */
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.title("Spotify Favorites Tracker")
+    
+    # Initialize session state variables with "False" as the default. With that we can store the button clicks and their changes for a user session
+    if "show_similar_songs" not in st.session_state:
+        st.session_state["show_similar_songs"] = False
+    if "show_artist_songs" not in st.session_state:
+        st.session_state["show_artist_songs"] = False
+    if "show_genre_songs" not in st.session_state:
+        st.session_state["show_genre_songs"] = False
+    if "similar_songs" not in st.session_state:
+        st.session_state["similar_songs"] = []
+
+    # User authentication through the Spotify API
+    sp = authenticate_spotify()
+    
+    if sp:
+        st.success("Authentication successful!")
+        
+        # Retrieve favorite song, artist, and genre data
+        song, song_artist, song_image, song_id = get_favorite_song(sp)
+        favorite_artist, artist_image, artist_id = get_favorite_artist(sp)
+        favorite_genre, genre_image = get_favorite_genre(sp)
+
+        # Retrieves top 5 artists with listening time and top 5 songs with estimated play counts
+        top_5_artists = get_top_5_artists(sp)
+        top_5_songs = get_top_5_songs(sp)
+
+        # Displays favorite song, artist, and genre with interactive elements in three columns (side by side)
+        col1, col2, col3 = st.columns(3)
+        
+
+        # Below we format the first section of the website, so that the favorite song is on the left-hand side, 
+        # the favorite artist in the middle, and the favorite genre on the right-hand side
+        with col1:
+            st.subheader("Favorite Song")
+            if song and song_artist:
+                st.image(song_image, width=150)
+                st.write(f"**{song}** by {song_artist}")
+
+                # Extract the artist ID for the favorite song
+                def get_song_artist_id(sp, song_name, artist_name):
+                    search_results = sp.search(q=f"track:{song_name} artist:{artist_name}", type="track", limit=1)
+                    if search_results["tracks"]["items"]:
+                        return search_results["tracks"]["items"][0]["artists"][0]["id"]
+                    return None
+
+                # Get the artist ID for the favorite song
+                song_artist_id = get_song_artist_id(sp, song, song_artist)
+
+                # Retrieve genres for the artist of the favorite song
+                def get_song_genre(sp, artist_id):
+                    if artist_id:
+                        artist_details = sp.artist(artist_id)
+                        return artist_details.get("genres", [])
+                    return []
+
+                # Get the genre for the current song's artist
+                song_genre = get_song_genre(sp, song_artist_id)
+
+                # Helper function to search for similar songs based on genre
+                def search_similar_songs(sp, genres):
+                    if genres:
+                        genre = genres[0]  # Use the first genre as a base
+                        # Add randomization to offset the search results so that we get different songs when we click refresh three similar songs
+                        random_offset = st.session_state.get("random_offset", 0)
+                        search_results = sp.search(q=f"genre:{genre}", type="track", limit=3, offset=random_offset)
+                        similar_songs = []
+                        for item in search_results["tracks"]["items"]:
+                            song_name = item["name"]
+                            artist_name = item["artists"][0]["name"]
+                            song_image = item["album"]["images"][0]["url"] if item["album"]["images"] else "https://via.placeholder.com/100"
+                            similar_songs.append((song_name, artist_name, song_image))
+                        return similar_songs
+                    else:
+                        return [("No Similar Songs", "N/A", "https://via.placeholder.com/100")]
+
+                # Button to find similar songs
+                def find_similar_songs():
+                    st.session_state.show_similar_songs = True
+                    st.session_state.similar_songs = search_similar_songs(sp, song_genre)
+
+                st.button("Find 3 Similar Songs", on_click=find_similar_songs)
+
+                # Show similar songs if the state is active
+                if st.session_state.get("show_similar_songs", False):
+                    st.write("**Similar Songs**")
+                    for sim_song, sim_artist, sim_img in st.session_state.similar_songs:
+                        st.image(sim_img, width=100)
+                        st.write(f"{sim_song} by {sim_artist}")
+
+                    # Button to refresh similar songs
+                    def refresh_similar_songs():
+                        # Generate a new random offset to get varied results
+                        import random
+                        st.session_state.random_offset = random.randint(0, 50)  # Random offset for search results
+                        st.session_state.similar_songs = search_similar_songs(sp, song_genre)
+
+                    st.button("Refresh Similar Songs", on_click=refresh_similar_songs)
+
+                    # Button to cancel similar songs
+                    def cancel_similar_songs():
+                        st.session_state.show_similar_songs = False
+
+                    st.button("Cancel Similar Songs", on_click=cancel_similar_songs)
+            else:
+                st.write("No favorite song data available.")
+
+        with col2:
+            st.subheader("Favorite Artist") # To be displayed with their profile image and name
+            if favorite_artist:
+                st.image(artist_image, width=150)
+                st.write(f"**{favorite_artist}**", unsafe_allow_html=True)
+                
+                # Show Songs by Favorite Artist
+                def toggle_artist_songs():
+                    st.session_state.show_artist_songs = not st.session_state.show_artist_songs
+                
+                st.button(f"Show Songs by {favorite_artist}", on_click=toggle_artist_songs)
+                
+                # Display artist songs if the state is active
+                if st.session_state.show_artist_songs:
+                    artist_tracks = get_artist_top_tracks(sp, artist_id)
+                    st.write(f"**Top Songs by {favorite_artist}**")
+                    for track_name, track_img in artist_tracks:
+                        st.image(track_img, width=100)
+                        st.write(track_name)
+                    
+                    # Cancel button for artist songs
+                    def cancel_artist_songs():
+                        st.session_state.show_artist_songs = False
+                    
+                    st.button("Cancel Artist Songs", on_click=cancel_artist_songs)
+            else:
+                st.write("No favorite artist data available.")
+
+        with col3:
+            st.subheader("Favorite Genre")
+            if favorite_genre:
+                if genre_image:
+                    st.image(genre_image, width=150)
+                st.write(f"**{favorite_genre.capitalize()}**", unsafe_allow_html=True)
+
+                # Function to fetch popular tracks for a given genre
+                def get_genre_popular_tracks(sp, genre):
+                    # Search for tracks in the given genre
+                    search_results = sp.search(q=f"genre:{genre}", type="track", limit=50)
+                    # Filter tracks with a popularity rating of 85 or higher
+                    popular_tracks = [
+                        (item["name"], item["album"]["images"][0]["url"])
+                        for item in search_results["tracks"]["items"]
+                        if item["popularity"] >= 85
+                    ]
+                    # Shuffle and return the top 5 tracks
+                    import random
+                    random.shuffle(popular_tracks)
+                    return popular_tracks[:5]
+
+                # Button action to toggle popular genre songs
+                def toggle_genre_songs():
+                    st.session_state.show_genre_songs = not st.session_state.show_genre_songs
+                    if st.session_state.show_genre_songs:
+                        st.session_state.genre_songs = get_genre_popular_tracks(sp, favorite_genre)
+
+                # Show the button
+                st.button(f"Show Popular {favorite_genre.capitalize()} Songs", on_click=toggle_genre_songs)
+
+                # Display popular songs from the genre if the state is active
+                if st.session_state.get("show_genre_songs", False):
+                    st.write(f"**Popular {favorite_genre.capitalize()} Songs**")
+                    for track_name, track_img in st.session_state.genre_songs:
+                        st.image(track_img, width=100)
+                        st.write(track_name)
+
+                    # Cancel button to hide genre songs
+                    def cancel_genre_songs():
+                        st.session_state.show_genre_songs = False
+
+                    st.button("Cancel Genre Songs", on_click=cancel_genre_songs)
+            else:
+                st.write("No favorite genre data available.")
+        
+        # Section for Top 5 Artists with Listening Time and Time Range Dropdown Menu
+
+        # Layout for Top 5 Artists (Listening Time) title and dropdown menu
+        artist_col1, artist_col2 = st.columns([3, 1])
+
+        with artist_col1:
+            st.subheader("Top 5 Artists")
+
+        with artist_col2:
+            # Dropdown menu for time range selection on the right side
+            time_range = st.selectbox(
+                "Select Time Range:", 
+                options=["short_term", "long_term"], 
+                index=1, 
+                help="Choose time range for top artists. Short Term = 4 weeks, Long Term = All Time",
+                key="artist_time_range"  # Unique key for this selectbox
+            )
+
+        # Fetch top 5 artists based on selected time range
+        top_5_artists_details = get_user_top_items(sp, item_type="artists", limit=5, time_range=time_range)
+
+        # Sort the artists based on their order returned by the API
+        sorted_artist_details = top_5_artists_details[:5]  # Ensure a maximum of 5 artists
+
+        # Ensure we always have 5 artists (add placeholders if necessary)
+        while len(sorted_artist_details) < 5:
+            sorted_artist_details.append(None)
+
+        # Display sorted artists in a grid format
+        artist_columns = st.columns(5)
+
+        for i, artist_detail in enumerate(sorted_artist_details):
+            with artist_columns[i]:
+                if artist_detail:  # Display valid artist data
+                    st.image(artist_detail['images'][0]['url'], width=100)
+                    st.caption(f"{artist_detail['name']}")  # Exclude listening time here
+
+                    # Expander for additional artist information
+                    with st.expander(f"{artist_detail['name']} - Additional Information"):
+                        artist_genres = ", ".join(artist_detail['genres'])
+                        st.write(f"**Genres**: {artist_genres}")
+                        
+                        # Retrieve and display top tracks for the artist
+                        artist_tracks = get_artist_top_tracks(sp, artist_detail['id'])
+                        st.write("**Top Songs:**")
+                        for track_name, track_img in artist_tracks:
+                            st.image(track_img, width=100)
+                            st.write(track_name)
+                else:  # Placeholder for missing artists
+                    st.image("https://via.placeholder.com/100", width=100)  # Placeholder image
+                    st.caption("No Artist")
+                
+
+        # Display top 5 songs in a grid format with estimated play counts
+      
+        # Create a row with two columns for the title and the dropdown menu
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            st.subheader("Top 5 Songs (Play Count)")
+
+        with col2:
+            # Dropdown menu for time range selection on the right side
+            song_time_range = st.selectbox(
+                "Select Time Range:", 
+                options=["short_term", "long_term"], 
+                index=1, 
+                help="Choose time range for top songs. Short Term = 4 weeks, Long Term = All Time",
+                key="song_time_range"  # Unique key for this selectbox
+            )
+
+
+        # Fetch top 5 songs based on selected time range and sort by play count in descending order
+        top_5_songs = get_top_5_songs(sp, time_range=song_time_range)
+        sorted_top_5_songs = sorted(top_5_songs, key=lambda x: x[3], reverse=True)  # Sort by play count using lambda
+
+        # Display sorted songs in columns from most to least played
+        song_columns = st.columns(5)
+        for i, (track_name, track_artist, track_img, play_count) in enumerate(sorted_top_5_songs):
+            with song_columns[i]:
+                # Display song image, name, and play count on separate lines for better readability
+                st.image(track_img, width=100)
+                st.markdown(
+                    f"<div style='text-align: center;'><strong>{track_name}</strong><br>"
+                    f"by {track_artist}<br>"
+                    f"Plays: {play_count}</div>",
+                    unsafe_allow_html=True
+                )
+    
+    else:
+        st.error("Authentication failed. Please try again.")
+
+if __name__ == "__main__":
+    main()
+
+
+def get_recent_tracks(sp, days_back):
+    """Fetch recent tracks played within the specified time range."""
+    end_time = datetime.now()
+    start_time = end_time - timedelta(days=days_back)
+    start_timestamp = int(start_time.timestamp()) * 1000  # Convert to milliseconds
+
+    all_tracks = []
+    results = sp.current_user_recently_played(limit=50, after=start_timestamp)
+
+    while results:
+        all_tracks.extend(results['items'])
+        if results['next']:
+            results = sp.next(results)
+        else:
+            break
+
+    return all_tracks
+
+
+def calculate_listening_time(tracks):
+    """Calculate total listening time in minutes."""
+    total_ms = sum([track['track']['duration_ms'] for track in tracks])
+    return total_ms / (1000 * 60)
+
+# Here another main() is used as the following code was first in a new .py and then integrated into this one. It tracks the time listened to Spotify in the last 24 hours/last week 
+def main():
+    st.title("Spotify Listening Tracker")
+
+    # Authenticate Spotify, but it does not check authenticity as this was already done above
+    sp = authenticate_spotify()
+        
+    # Choose time period (Yesterday or last week)
+    time_period = st.selectbox("Select Time Period:", ["Last 24 hours", "Last Week"])
+    days_back = 1 if time_period == "Last 24 hours" else 7
+
+    # Fetch listening data
+    with st.spinner("Fetching your listening history..."): # More engaging for the user
+        try:
+            tracks = get_recent_tracks(sp, days_back)
+            if tracks:
+                total_minutes = calculate_listening_time(tracks)
+                st.write(f"You listened to Spotify for **{total_minutes:.2f} minutes** in the {time_period.lower()}.")
+            else:
+                st.warning("No listening data available for this period.")
+        except spotipy.exceptions.SpotifyException as e:
+            st.error(f"Failed to fetch data: {str(e)}")
+
+
+if __name__ == "__main__":
+    main()
+
+# ChatGPT was used to give feedback on the code or for troubleshooting, as well as fixing the problems with the Spotify API.
