@@ -1,0 +1,212 @@
+import streamlit as st
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+from config import SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SPOTIPY_REDIRECT_URI, scope
+import pandas as pd
+import numpy as np
+from sklearn.cluster import KMeans
+import plotly.graph_objects as go
+
+# Spotify Authentication
+auth_manager = SpotifyOAuth(client_id=SPOTIPY_CLIENT_ID,
+                            client_secret=SPOTIPY_CLIENT_SECRET,
+                            redirect_uri='http://localhost:8505/Audio_analysis',
+                            scope=scope,
+                            open_browser=False)
+
+sp = spotipy.Spotify(auth_manager=auth_manager)
+
+# App Header
+st.markdown("""
+    <h1 style='font-size: 50px; 
+               color: black; 
+               background: 
+                   linear-gradient(120deg, #FFFFFF,  #d6eaf8  );  
+               padding: 10px; 
+               border-radius: 30px;
+               '>Music Clustering and Visualization</h1>
+    """, unsafe_allow_html=True)
+
+st.subheader("Explore clusters of your music based on Spotify's audio features!!")
+
+#fetch the first (last in chronological order) 50 liked song and extraxt parameters such as danceability, energy, valence etc.
+results = sp.current_user_saved_tracks(limit=50) 
+audio_features = []
+song_names = []
+artists = []
+
+for item in results['items']:
+    track = item['track']
+    features = sp.audio_features(track['id'])[0]
+    if features:
+        audio_features.append(features)
+        song_names.append(track['name'])
+        artists.append(track['artists'][0]['name'])
+
+#this converts the audio features into a dataframe with Pandas in order to be manipulated, we exclude tempo since it creates scaöiong problem
+if audio_features:
+    df = pd.DataFrame(audio_features)
+    df['song_names'] = song_names
+    df['artist'] = artists
+
+# Key features for clustering (excluding 'tempo')
+features = ['danceability', 'energy', 'valence', 'speechiness', 'instrumentalness']
+data = df[features]
+
+#we used K-means clustering to group songs into X cluster, we can change that later on. more cluster, more definition. CAN MAKE CHANGE HERE!!!!!
+num_cluster = 4
+Kmeans = KMeans(n_clusters=num_cluster, random_state=42)  #random_state is used to shuffle data before splitting it into a training test
+df['Cluster'] = Kmeans.fit_predict(data)
+
+# Grouping Data for Clusters
+cluster_mean = df.groupby('Cluster')[features].mean()   #this summarises the average audio features for each cluster 
+color_palette = ['#ff0303', '#03fffb', '#1eff03', '#034cff', '#f403ff']
+
+# Replace Scatterplot with Radar Chart for All Clusters
+st.subheader("Cluster Visualization with Radar Chart")
+
+##### 
+# visualization in radar chart
+# each axis represents an audio feature (danceability, energy, etc.)
+# clusters are visualized as shapes based on the average values of the features. 
+#we chose a radar chart since it allows for multiple dimension
+####
+fig = go.Figure()
+
+for cluster_num in range(num_cluster):
+    cluster_features = cluster_mean.loc[cluster_num]
+    
+    # Radar chart requires cyclic data
+    categories = list(cluster_features.index)
+    values = list(cluster_features.values)
+    values += values[:1]  # Close the loop
+    categories += categories[:1]
+
+    # Add cluster data to radar chart
+    fig.add_trace(go.Scatterpolar(
+        r=values,
+        theta=categories,
+        fill='toself',
+        name=f'Cluster {cluster_num}',
+        marker_color=color_palette[cluster_num]
+    ))
+
+# Layout customization for Radar Chart
+fig.update_layout(
+    polar=dict(
+        radialaxis=dict(
+            visible=True,
+            range=[0, 1]  # Normalize values to [0, 1]
+        )
+    ),
+    title="Audio Feature Clusters",
+    showlegend=True
+)
+
+# Show chart in Streamlit
+st.plotly_chart(fig)
+
+# Cluster Insights
+st.subheader("Cluster Insight")
+
+###
+# the purpose of this is tpo get a detailed information about each cluster and their average parameters
+# each bar chart helps to understand the 'personality' of each cluster 
+###
+
+for cluster_num in range(num_cluster):
+    st.write(f"### Cluster {cluster_num}")
+
+    # Exclude 'tempo' for the bar chart
+    cluster_features = cluster_mean.loc[cluster_num]
+
+    # Bar chart
+    feature_chart = go.Figure([go.Bar(
+        x=cluster_features.index,
+        y=cluster_features.values,
+        marker=dict(color=color_palette[cluster_num]))])
+
+    feature_chart.update_layout(title=f"Average Audio Features for Cluster {cluster_num}",
+                                xaxis_title="Audio Features",
+                                yaxis_title="Value",
+                                showlegend=False)
+    
+    st.plotly_chart(feature_chart)
+
+
+    # Cluster description
+    st.write("**Cluster Description:**")
+    if cluster_features['danceability'] > 0.7:
+        st.write("- High danceability: Suitable for dancing or parties.")
+    if cluster_features['energy'] > 0.7:
+        st.write("- High energy: Songs with a lively and upbeat vibe.")
+    if cluster_features['speechiness'] > 0.3:
+        st.write("- Moderate to high speechiness: Songs likely to contain spoken words, such as podcasts or rap.")
+    if cluster_features['instrumentalness'] > 0.5:
+        st.write("- High instrumentalness: Predominantly instrumental tracks.")
+    if cluster_features['valence'] > 0.5:
+        st.write("- High valence: Positive and happy mood.")
+    if cluster_features['valence'] < 0.3:
+        st.write("- Low valence: Songs with a sad or melancholic mood.")
+
+    # Display songs in the cluster
+    st.write("**Songs in this Cluster:**")
+    cluster_df = df[df['Cluster'] == cluster_num]
+    for idx, row in cluster_df.iterrows():
+        st.write(f"**{row['song_names']}** by {row['artist']}")
+
+    st.divider()
+
+# Music library summary
+st.subheader("Music Library Summary")
+st.write(f"**Total Songs Analyzed:** {len(df)}")
+st.write(f"**Number of Clusters:** {num_cluster}")
+
+most_common_cluster = df['Cluster'].value_counts().idxmax()
+st.write(f"**Most Common Cluster:** Cluster {most_common_cluster} with {df['Cluster'].value_counts().max()} songs.")
+
+####
+# Recommendations and Playlist Creation
+# this provides songs recomendation based on the cluster with the most common songs in it
+#The app uses Spotify’s recommendations API to suggest songs that match the average audio features of the most popular cluster.
+###
+
+st.subheader(f"Want to get more songs like: Cluster No. {most_common_cluster}?")
+if st.button("YES"):
+    best_cluster_features = cluster_mean.loc[most_common_cluster]
+
+    recommendations = sp.recommendations(
+        limit=50,
+        seed_artists=None,
+        seed_genres=None,
+        seed_tracks=df[df['Cluster'] == most_common_cluster]['id'].tolist()[:5],
+        target_danceability=min(1.0, max(0.0, best_cluster_features['danceability'])),
+        target_energy=min(1.0, max(0.0, best_cluster_features['energy'])),
+        target_valence=min(1.0, max(0.0, best_cluster_features['valence'])),
+        target_speechiness=min(1.0, max(0.0, best_cluster_features['speechiness'])),
+        target_instrumentalness=min(1.0, max(0.0, best_cluster_features['instrumentalness']))
+    )
+    
+    st.session_state.track_ids = [track['id'] for track in recommendations['tracks']] 
+
+    st.subheader("Recommendations based on your preferred Audio features:")
+    columns = st.columns(3)
+    for idx, track in enumerate(recommendations['tracks']):
+        col = columns[idx % 3]  # Cycles through 3 columns
+        with col:
+            st.write(f"**{track['name']}** by **{track['artists'][0]['name']}**")
+            st.image(track['album']['images'][0]['url'], width=150)
+            st.markdown(f"[Listen on Spotify]({track['external_urls']['spotify']})")
+            st.markdown("<br>", unsafe_allow_html=True)  # Adds spacing
+
+    playlist_name = st.text_input("How would you call it?", placeholder="Enter playlist name", help="A new playlist will be created in your Spotify Library")
+
+
+#this creates a playlist based on the recommendation given earlier this does not seem to work… for now
+    if st.button("Create Playlist") and playlist_name and 'track_ids' in st.session_state:
+        user_id = sp.me()['id']
+        new_playlist = sp.user_playlist_create(user=user_id, name=playlist_name, public=False, description="Playlist created by SPoolify")
+        sp.user_playlist_add_tracks(user=user_id, playlist_id=new_playlist['id'], tracks=st.session_state.track_ids)
+        st.success("Playlist created and songs added! Check your Spotify!")
+    else:
+        st.write("An unknown error has occurred.")
