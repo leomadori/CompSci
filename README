@@ -27,5 +27,5 @@ for any inquiries about this please reach out to: leonardo.reina@student.unisg.c
 ## Running the application
 
 To smoothly run the application use this code snippet
-```bash
+```python
 streamlit run Home.py --server.port 8505
