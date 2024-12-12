@@ -1,0 +1,31 @@
+welcome to our project, there are some consideratons to be made before you run the code:
+
+## Prerequisites
+make sure Phyton 3.8 or above is installed
+
+the required packages are:
+spotipy
+pandas
+scikit-learn
+plotly
+collections-extended
+streamlit
+
+please ensure that they are installed on your machine
+
+Important: the code MUST run on port 8505 -> see "Running the application"
+
+
+## Spotify Authentication
+One page of out WebApp requires a Spotify subscription, we may understand the examiner may not have one.
+The code has a cached access token linked to my personal Spotify Account (Group Memeber: Leonardo Reina).
+If that, for some reason, may not work please go on the Homepage and click the "Reveal Spotify Credentials". There you will find my personal Spotify Account email and password and you should be able to login.
+
+for any inquiries about this please reach out to: leonardo.reina@student.unisg.ch (+41 79 913 10 23)
+
+
+## Running the application
+
+To smoothly run the application use this code snippet
+```bash
+streamlit run Home.py --server.port 8505
